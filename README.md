@@ -130,7 +130,7 @@ sam deploy --guided  # 예: Stack Name = costsecurity-dev
 ## 아키텍처 개요
 ```mermaid
 flowchart LR
-  EVB[EventBridge &#40;Weekly&#41;] --> Cost[cost_collector Lambda]
+  EVB[EventBridge #40;Weekly#41;] --> Cost[cost_collector Lambda]
   EVB --> Sec[sec_collector Lambda]
   Cost --> S3[S3 Artifacts]
   Sec --> S3
@@ -139,6 +139,7 @@ flowchart LR
   Corr --> Rep[reporter Lambda]
   Rep --> SNS[SNS, Email, Slack]
   Rep --> QS[Optional: QuickSight Dataset]
+
 
 ```
 - EventBridge가 주간 cron으로 비용/보안 수집기를 호출
