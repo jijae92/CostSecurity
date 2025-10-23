@@ -1,0 +1,13 @@
+{
+  "Findings": [
+    {
+      "Id": "arn:aws:securityhub:us-east-1:123456789012:sample/finding/1",
+      "AwsAccountId": "123456789012",
+      "Region": "us-east-1",
+      "ProductArn": "arn:aws:securityhub:us-east-1::product/aws/securityhub",
+      "Severity": {"Label": "CRITICAL"},
+      "Title": "Port scanning activity detected",
+      "CreatedAt": "2025-10-19T02:15:00+00:00"
+    }
+  ]
+}

@@ -1,0 +1,19 @@
+# Runbook
+
+## 1. Detect
+- Check CloudWatch Logs for each Lambda (`/aws/lambda/cost-security-*`).
+- Review custom metrics: `CostSecurity/CollectedRecords`, `CostSecurity/CorrelatedSignals` (TODO).
+
+## 2. Stabilize
+- Re-run failed Lambda from AWS Console or via `sam remote invoke`.
+- Enable DRY_RUN by setting `DRY_RUN=true` in environment variables to replay sample data.
+
+## 3. Mitigate
+- Use false-positive manager to suppress noisy signals temporarily.
+- Rotate credentials or update IAM policies if access errors occur.
+
+## 4. Restore
+- Trigger CodePipeline redeploy after fixes (`Release` stage).
+- Document incident summary and lessons learned in this runbook.
+
+TODO: Flesh out suppression workflow and escalation matrix.

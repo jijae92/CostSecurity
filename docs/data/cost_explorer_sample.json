@@ -1,0 +1,19 @@
+{
+  "ResultsByTime": [
+    {
+      "TimePeriod": {
+        "Start": "2025-10-13",
+        "End": "2025-10-20"
+      },
+      "Groups": [
+        {
+          "Keys": ["AmazonEC2", "123456789012"],
+          "Metrics": {
+            "BlendedCost": {"Amount": "120.5", "Unit": "USD"},
+            "UsageQuantity": {"Amount": "50", "Unit": "Hours"}
+          }
+        }
+      ]
+    }
+  ]
+}

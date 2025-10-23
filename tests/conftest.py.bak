@@ -1,0 +1,17 @@
+"""Pytest configuration for path setup."""
+
+from __future__ import annotations
+
+import os
+import sys
+from pathlib import Path
+
+ROOT = Path(__file__).resolve().parents[1]
+SRC = ROOT / "src"
+if SRC.exists():
+    sys.path.insert(0, str(ROOT))
+    sys.path.insert(0, str(SRC))
+
+# Ensure dotenv loading for local runs (TODO: consider python-dotenv usage).
+os.environ.setdefault("APP_ENV", "dev")
+os.environ.setdefault("DRY_RUN", "true")

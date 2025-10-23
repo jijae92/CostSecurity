@@ -1,0 +1,55 @@
+"""Shared data models for correlation logic."""
+
+from __future__ import annotations
+
+from dataclasses import dataclass
+from datetime import datetime
+from typing import Any, Dict, List, Optional
+
+
+@dataclass(slots=True)
+class CostDatum:
+    """Normalized representation of a cost usage record."""
+
+    account_id: str
+    service: str
+    region: str
+    amount: float
+    currency: str
+    usage_quantity: float
+    timestamp: datetime
+
+
+@dataclass(slots=True)
+class SecurityFinding:
+    """Normalized representation of a security finding."""
+
+    finding_id: str
+    account_id: str
+    region: str
+    service: str
+    severity: str
+    title: str
+    created_at: datetime
+    raw: Dict[str, Any]
+
+
+@dataclass(slots=True)
+class CorrelatedSignal:
+    """Output of the correlation process linking cost and security anomalies."""
+
+    correlation_id: str
+    cost: CostDatum
+    findings: List[SecurityFinding]
+    score: float
+    rule_hits: List[str]
+    notes: Optional[str] = None
+
+
+@dataclass(slots=True)
+class FalsePositiveEntry:
+    """Represents a suppressed combination for the false-positive manager."""
+
+    scope: str
+    expires_at: datetime
+    comment: Optional[str] = None

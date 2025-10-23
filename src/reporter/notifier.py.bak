@@ -1,0 +1,98 @@
+"""Notification helpers for SNS, Slack, and S3."""
+
+from __future__ import annotations
+
+import json
+from dataclasses import dataclass
+from pathlib import Path
+from typing import Any, Dict, Iterable, Optional
+
+import boto3
+from botocore.config import Config
+from botocore.exceptions import BotoCoreError, ClientError
+from tenacity import RetryError, retry, retry_if_exception_type, stop_after_attempt, wait_exponential_jitter
+
+from src.common.log import get_logger
+
+LOGGER = get_logger(__name__)
+
+
+@dataclass(slots=True)
+class NotificationTargets:
+    sns_topic_arn: Optional[str]
+    slack_webhook: Optional[str]
+    s3_bucket: Optional[str]
+
+
+@dataclass(slots=True)
+class Notifier:
+    """Dispatch formatted reports to configured targets."""
+
+    sns_client: Any
+    s3_client: Any
+    http_session: Any
+    targets: NotificationTargets
+    dry_run: bool
+
+    @classmethod
+    def from_config(cls, config: "AppConfig") -> "Notifier":
+        session = boto3.session.Session(region_name=config.aws_region)
+        boto_config = Config(connect_timeout=10, read_timeout=10, retries={"max_attempts": 3})
+        sns_client = session.client("sns", config=boto_config)
+        s3_client = session.client("s3", config=boto_config)
+        http_session = _build_http_session()
+        targets = NotificationTargets(
+            sns_topic_arn=config.sns_topic_arn,
+            slack_webhook=config.slack_webhook_url,
+            s3_bucket=config.reports_bucket,
+        )
+        return cls(sns_client=sns_client, s3_client=s3_client, http_session=http_session, targets=targets, dry_run=config.dry_run)
+
+    def send(self, *, subject: str, markdown_body: str, html_body: str, csv_rows: Iterable[str], object_key: str) -> None:
+        if self.dry_run:
+            LOGGER.info("Dry-run: notification suppressed", extra={"subject": subject, "object_key": object_key})
+            return
+        if self.targets.sns_topic_arn:
+            self._publish_sns(subject=subject, message=markdown_body)
+        if self.targets.slack_webhook:
+            self._post_slack(message=markdown_body)
+        if self.targets.s3_bucket:
+            self._upload_csv(bucket=self.targets.s3_bucket, rows=csv_rows, object_key=object_key)
+
+    @retry(
+        stop=stop_after_attempt(3),
+        wait=wait_exponential_jitter(max=10),
+        retry=retry_if_exception_type((ClientError, BotoCoreError)),
+        reraise=True,
+    )
+    def _publish_sns(self, *, subject: str, message: str) -> None:
+        self.sns_client.publish(TopicArn=self.targets.sns_topic_arn, Subject=subject[:100], Message=message)
+
+    def _post_slack(self, *, message: str) -> None:
+        response = self.http_session.post(
+            self.targets.slack_webhook,
+            data=json.dumps({"text": message}),
+            timeout=10,
+            headers={"Content-Type": "application/json"},
+        )
+        if response.status_code >= 400:
+            raise RuntimeError(f"Slack webhook failed: {response.status_code}")
+
+    def _upload_csv(self, *, bucket: str, rows: Iterable[str], object_key: str) -> None:
+        body = "\n".join(rows).encode("utf-8")
+        self.s3_client.put_object(Bucket=bucket, Key=object_key, Body=body)
+
+
+def _build_http_session():
+    try:
+        import requests
+    except ImportError as exc:
+        raise RuntimeError("requests package missing; required for Slack notifications.") from exc
+    session = requests.Session()
+    adapter = requests.adapters.HTTPAdapter(max_retries=3)
+    session.mount("https://", adapter)
+    session.mount("http://", adapter)
+    return session
+
+
+from src.common.config import AppConfig  # noqa: E402  pylint: disable=wrong-import-position

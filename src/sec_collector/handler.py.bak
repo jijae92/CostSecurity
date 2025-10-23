@@ -1,0 +1,47 @@
+"""Lambda handler for weekly security signal collection."""
+
+from __future__ import annotations
+
+from typing import Any, Dict
+
+from src.common.config import AppConfig, load_config
+from src.common.log import get_logger
+from src.common.s3io import RawS3Writer
+from src.common.timeutil import isoformat_no_ms
+
+from .gd_client import GuardDutyClient
+from .sh_client import SecurityHubClient
+
+LOGGER = get_logger(__name__)
+
+
+def lambda_handler(event: Dict[str, Any], _context: Any) -> Dict[str, Any]:
+    """Collect findings from Security Hub and GuardDuty."""
+    config = load_config()
+    LOGGER.info("Starting security collection", extra={"env": config.environment, "dry_run": config.dry_run})
+
+    security_hub_filters = event.get("security_hub_filters")
+    guardduty_detector_id = event.get("guardduty_detector_id")
+
+    sh_client = SecurityHubClient.from_config(config)
+    gd_client = GuardDutyClient.from_config(config)
+
+    sh_findings = sh_client.find_findings(filters=security_hub_filters)
+    gd_findings = gd_client.list_findings(detector_id=guardduty_detector_id)
+
+    writer = RawS3Writer.from_config(config)
+    object_key = f"security/{config.environment}/{isoformat_no_ms()}-findings.json"
+    writer.persist(payload={"securityhub": sh_findings, "guardduty": gd_findings}, object_key=object_key)
+
+    summary = {
+        "status": "success",
+        "securityhub_count": len(sh_findings.get("Findings", [])),
+        "guardduty_count": len(gd_findings.get("Findings", [])) if isinstance(gd_findings, dict) else len(gd_findings or []),
+        "object_key": object_key,
+    }
+    LOGGER.info("Security collection completed", extra=summary)
+    return summary
+
+
+if __name__ == "__main__":
+    raise SystemExit("Use AWS SAM or `make invoke-security` to run the handler.")

@@ -1,0 +1,57 @@
+"""Report formatting helpers."""
+
+from __future__ import annotations
+
+from typing import Any, Dict, Iterable, List
+
+from src.common.log import get_logger
+
+LOGGER = get_logger(__name__)
+
+
+def to_markdown(signals: Iterable[Dict[str, Any]]) -> str:
+    """Render a simple markdown summary."""
+    lines = ["# Weekly Cost × Security Correlation Report", ""]
+    count = 0
+    for count, signal in enumerate(signals, start=1):
+        lines.append(f"## Correlation {count}: {signal.get('correlation_id', 'n/a')}")
+        lines.append(f"- Score: {signal.get('score', 0)}")
+        lines.append(f"- Rule hits: {', '.join(signal.get('rule_hits', [])) or 'None'}")
+        lines.append("")
+    if count == 0:
+        lines.append("No correlated signals detected this week.")
+    return "\n".join(lines)
+
+
+def to_html(signals: Iterable[Dict[str, Any]]) -> str:
+    """Render a simple HTML summary."""
+    items = "".join(
+        f"<li><strong>{signal.get('correlation_id')}</strong> — Score {signal.get('score')}</li>" for signal in signals
+    )
+    return f"<h1>Weekly Cost × Security Correlation Report</h1><ul>{items or '<li>No signals.</li>'}</ul>"
+
+
+def to_csv_rows(signals: Iterable[Dict[str, Any]]) -> List[str]:
+    """Generate CSV rows ready for upload."""
+    header = "correlation_id,score,rule_hits"
+    rows = [header]
+    for signal in signals:
+        rows.append(
+            ",".join(
+                [
+                    signal.get("correlation_id", "n/a"),
+                    str(signal.get("score", 0)),
+                    "|".join(signal.get("rule_hits", [])),
+                ]
+            )
+        )
+    return rows
+
+
+def redact(value: str | None) -> str:
+    """Redact sensitive values in logs."""
+    if not value:
+        return ""
+    if len(value) < 6:
+        return "***"
+    return f"{value[:3]}***{value[-3:]}"

@@ -1,0 +1,130 @@
+"""Lambda handler for correlation stage."""
+
+from __future__ import annotations
+
+import json
+from typing import Any, Dict, List
+
+from src.common.config import load_config
+from src.common.log import get_logger
+from src.common.s3io import RawS3Reader, ReportS3Writer
+from src.correlate.correlate import correlate
+from src.correlate.models import CorrelatedSignal, CostDatum, SecurityFinding
+from src.correlate.fp_manager import FalsePositiveManager
+
+LOGGER = get_logger(__name__)
+
+
+def lambda_handler(event: Dict[str, Any], _context: Any) -> Dict[str, Any]:
+    """Correlate cost anomalies with security findings."""
+    config = load_config()
+    LOGGER.info("Starting correlation", extra={"env": config.environment, "dry_run": config.dry_run})
+
+    reader = RawS3Reader.from_config(config)
+    cost_key = event.get("cost_object_key")
+    security_key = event.get("security_object_key")
+    if not cost_key or not security_key:
+        raise ValueError("cost_object_key and security_object_key must be provided")
+
+    cost_payload = reader.load(object_key=cost_key)
+    security_payload = reader.load(object_key=security_key)
+
+    costs = _normalise_costs(cost_payload)
+    findings = _normalise_findings(security_payload)
+
+    signals = correlate(cost_records=costs, findings=findings)
+    fp_manager = FalsePositiveManager.from_seed()
+    filtered = [signal for signal in signals if not fp_manager.is_suppressed(signal)]
+
+    writer = ReportS3Writer.from_config(config)
+    result_key = writer.persist_json(payload=[_to_dict(signal) for signal in filtered], prefix="correlated")
+
+    LOGGER.info("Correlation completed", extra={"signals": len(filtered), "object_key": result_key})
+    return {"status": "success", "signals": len(filtered), "object_key": result_key}
+
+
+def _normalise_costs(payload: Dict[str, Any]) -> List[CostDatum]:
+    results = []
+    for entry in payload.get("ResultsByTime", []):
+        for group in entry.get("Groups", []):
+            results.append(
+                CostDatum(
+                    account_id=_dimension_value(group, 1),
+                    service=_dimension_value(group, 0),
+                    region=entry.get("TimePeriod", {}).get("Start", "global"),
+                    amount=float(group.get("Metrics", {}).get("BlendedCost", {}).get("Amount", 0.0)),
+                    currency=group.get("Metrics", {}).get("BlendedCost", {}).get("Unit", "USD"),
+                    usage_quantity=float(group.get("Metrics", {}).get("UsageQuantity", {}).get("Amount", 0.0)),
+                    timestamp=_parse_time(entry.get("TimePeriod", {}).get("Start")),
+                )
+            )
+    return results
+
+
+def _normalise_findings(payload: Dict[str, Any]) -> List[SecurityFinding]:
+    findings = []
+    for finding in payload.get("securityhub", {}).get("Findings", []):
+        findings.append(_from_security_hub(finding))
+    for finding in payload.get("guardduty", {}).get("Findings", []):
+        findings.append(_from_guardduty(finding))
+    return findings
+
+
+def _dimension_value(group: Dict[str, Any], index: int) -> str:
+    dimensions = group.get("Keys", [])
+    if len(dimensions) > index:
+        return dimensions[index]
+    return "unknown"
+
+
+def _parse_time(value: str | None):
+    from datetime import datetime
+
+    if not value:
+        return datetime.utcnow()
+    return datetime.fromisoformat(value)
+
+
+def _from_security_hub(finding: Dict[str, Any]) -> SecurityFinding:
+    from datetime import datetime
+
+    return SecurityFinding(
+        finding_id=finding.get("Id", "unknown"),
+        account_id=finding.get("AwsAccountId", "unknown"),
+        region=finding.get("Region", "unknown"),
+        service=finding.get("ProductArn", "unknown"),
+        severity=str(finding.get("Severity", {}).get("Label", finding.get("Severity", "LOW"))),
+        title=finding.get("Title", ""),
+        created_at=datetime.fromisoformat(finding.get("CreatedAt", datetime.utcnow().isoformat())),
+        raw=finding,
+    )
+
+
+def _from_guardduty(finding: Dict[str, Any]) -> SecurityFinding:
+    from datetime import datetime
+
+    return SecurityFinding(
+        finding_id=finding.get("Id", "unknown"),
+        account_id=finding.get("AccountId", "unknown"),
+        region=finding.get("Region", "unknown"),
+        service=finding.get("Type", "guardduty"),
+        severity=str(finding.get("Severity", "LOW")),
+        title=finding.get("Title", ""),
+        created_at=datetime.fromisoformat(finding.get("CreatedAt", datetime.utcnow().isoformat())),
+        raw=finding,
+    )
+
+
+def _to_dict(signal: CorrelatedSignal) -> Dict[str, Any]:
+    return {
+        "correlation_id": signal.correlation_id,
+        "score": signal.score,
+        "rule_hits": signal.rule_hits,
+        "notes": signal.notes,
+        "cost": signal.cost.__dict__,
+        "findings": [finding.__dict__ for finding in signal.findings],
+    }
+
+
+if __name__ == "__main__":
+    raise SystemExit("Invoke via Lambda or orchestrated workflow only.")

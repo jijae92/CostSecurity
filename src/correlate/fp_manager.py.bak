@@ -1,0 +1,39 @@
+"""False positive management utilities."""
+
+from __future__ import annotations
+
+from dataclasses import dataclass
+from datetime import datetime, timezone
+from typing import Dict, Iterable
+
+from .models import CorrelatedSignal, FalsePositiveEntry
+
+
+@dataclass(slots=True)
+class FalsePositiveManager:
+    """Track suppressed signals to minimise noise."""
+
+    store: Dict[str, FalsePositiveEntry]
+
+    @classmethod
+    def from_seed(cls, entries: Iterable[FalsePositiveEntry] | None = None) -> "FalsePositiveManager":
+        seed = entries or []
+        return cls(store={entry.scope: entry for entry in seed})
+
+    def is_suppressed(self, signal: CorrelatedSignal) -> bool:
+        """Return True when the signal should be muted."""
+        entry = self.store.get(signal.correlation_id)
+        if not entry:
+            return False
+        if entry.expires_at < datetime.now(timezone.utc):
+            return False
+        return True
+
+    def suppress(self, signal: CorrelatedSignal, *, hours: int, comment: str | None = None) -> None:
+        """Suppress a signal for a limited time window."""
+        expires = datetime.now(timezone.utc) + timedelta(hours=hours)
+        self.store[signal.correlation_id] = FalsePositiveEntry(scope=signal.correlation_id, expires_at=expires, comment=comment)
+
+
+# NOTE: importing here to avoid circular dependencies at runtime.
+from datetime import timedelta  # noqa: E402  pylint: disable=wrong-import-position

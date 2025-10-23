@@ -1,0 +1,67 @@
+"""Simple rule engine scaffold."""
+
+from __future__ import annotations
+
+from dataclasses import dataclass, field
+from typing import Iterable, List
+
+from .models import CorrelatedSignal, CostDatum, SecurityFinding
+
+
+@dataclass(slots=True)
+class RuleContext:
+    """Context passed to rule evaluators."""
+
+    cost: CostDatum
+    findings: Iterable[SecurityFinding]
+
+
+@dataclass(slots=True)
+class RuleResult:
+    """Result of a single rule evaluation."""
+
+    name: str
+    passed: bool
+    message: str | None = None
+
+
+@dataclass(slots=True)
+class RuleEngine:
+    """Minimal rule engine placeholder."""
+
+    rules: List[str] = field(default_factory=lambda: ["spike_with_critical_finding"])
+
+    def evaluate(self, context: RuleContext) -> List[RuleResult]:
+        """Evaluate all registered rules."""
+        results: List[RuleResult] = []
+        for rule_name in self.rules:
+            if rule_name == "spike_with_critical_finding":
+                result = self._rule_spike_with_critical_finding(context)
+            else:
+                result = RuleResult(name=rule_name, passed=True, message="Rule not implemented yet.")
+            results.append(result)
+        return results
+
+    def _rule_spike_with_critical_finding(self, context: RuleContext) -> RuleResult:
+        critical_findings = [finding for finding in context.findings if finding.severity.lower() in {"high", "critical"}]
+        if critical_findings and context.cost.amount > 0:
+            return RuleResult(name="spike_with_critical_finding", passed=False, message="Critical finding during cost increase.")
+        return RuleResult(name="spike_with_critical_finding", passed=True, message="No critical findings detected.")
+
+    def to_correlated_signal(self, *, context: RuleContext, signal_id: str) -> CorrelatedSignal:
+        """Create a correlated signal summarizing rule evaluation results."""
+        results = self.evaluate(context)
+        failed = [r for r in results if not r.passed]
+        score = float(len(failed))
+        notes = "; ".join(filter(None, (r.message for r in failed))) or None
+        return CorrelatedSignal(
+            correlation_id=signal_id,
+            cost=context.cost,
+            findings=list(context.findings),
+            score=score,
+            rule_hits=[r.name for r in failed],
+            notes=notes,
+        )
+
+
+__all__ = ["RuleEngine", "RuleContext", "RuleResult"]

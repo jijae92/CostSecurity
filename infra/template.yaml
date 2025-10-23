@@ -1,0 +1,223 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Transform: AWS::Serverless-2016-10-31
+Description: >-
+  Cost × Security Correlation weekly pipeline. NOTE: tighten IAM resource scopes (account/region) before production deployment.
+
+Globals:
+  Function:
+    Runtime: python3.11
+    Timeout: 60
+    MemorySize: 512
+    Tracing: Active
+    Environment:
+      Variables:
+        APP_ENV: !Ref EnvName
+        AWS_REGION: !Ref AWS::Region
+        LOG_LEVEL: INFO
+        DRY_RUN: false
+        RAW_DATA_BUCKET: !Sub '${ArtifactBucket}'
+        REPORTS_BUCKET: !Sub '${ArtifactBucket}'
+        REPORT_TOPIC_ARN: !Ref ReportTopic
+        DELTA_THRESHOLD: !Ref DeltaThreshold
+        ZSCORE_THRESHOLD: !Ref ZScoreThreshold
+        SEVERITY_MIN: !Ref SeverityMinimum
+        SSM_PARAMETER_PREFIX: !Ref ParameterPrefix
+        SECRETS_PREFIX: !Ref SecretsPrefix
+        COST_LOOKBACK_DAYS: !Ref CostLookbackDays
+        COST_TIMEZONE: UTC
+
+Parameters:
+  EnvName:
+    Type: String
+    Default: dev
+    AllowedValues:
+      - dev
+      - stage
+      - prod
+  ParameterPrefix:
+    Type: String
+    Default: cost-security
+  SecretsPrefix:
+    Type: String
+    Default: cost-security/secrets
+  CostLookbackDays:
+    Type: Number
+    Default: 14
+  DeltaThreshold:
+    Type: Number
+    Default: 30
+  ZScoreThreshold:
+    Type: Number
+    Default: 2
+  SeverityMinimum:
+    Type: String
+    Default: MEDIUM
+  ScheduleCron:
+    Type: String
+    Default: cron(0 2 ? * MON *)
+
+Resources:
+  ArtifactBucket:
+    Type: AWS::S3::Bucket
+    Properties:
+      VersioningConfiguration:
+        Status: Enabled
+
+  ReportTopic:
+    Type: AWS::SNS::Topic
+    Properties:
+      DisplayName: CostSecurityWeeklyAlerts
+
+  CostCollectorFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      CodeUri: ../src/
+      Handler: src.cost_collector.handler.lambda_handler
+      Description: Collect AWS Cost Explorer data for the weekly window.
+      Policies:
+        - AWSLambdaBasicExecutionRole
+        - Statement:
+            Effect: Allow
+            Action:
+              - ce:GetCostAndUsage
+            Resource: '*'
+        - Statement:
+            Effect: Allow
+            Action:
+              - s3:PutObject
+            Resource: !Sub '${ArtifactBucket.Arn}/*'
+      Events:
+        ApiTrigger:
+          Type: Api
+          Properties:
+            Path: /cost
+            Method: POST
+
+  SecCollectorFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      CodeUri: ../src/
+      Handler: src.sec_collector.handler.lambda_handler
+      Description: Collect SecurityHub/GuardDuty signals for correlation.
+      Policies:
+        - AWSLambdaBasicExecutionRole
+        - Statement:
+            Effect: Allow
+            Action:
+              - securityhub:GetFindings
+              - guardduty:ListDetectors
+              - guardduty:GetFindings
+            Resource: '*'
+        - Statement:
+            Effect: Allow
+            Action:
+              - s3:PutObject
+            Resource: !Sub '${ArtifactBucket.Arn}/*'
+
+  CorrelateFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      CodeUri: ../src/
+      Handler: src.correlate.handler.lambda_handler
+      Description: Correlate cost anomalies and security findings.
+      Policies:
+        - AWSLambdaBasicExecutionRole
+        - Statement:
+            Effect: Allow
+            Action:
+              - s3:GetObject
+              - s3:PutObject
+            Resource: !Sub '${ArtifactBucket.Arn}/*'
+        - Statement:
+            Effect: Allow
+            Action:
+              - sns:Publish
+            Resource: !Ref ReportTopic
+
+  ReporterFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      CodeUri: ../src/
+      Handler: src.reporter.handler.lambda_handler
+      Description: Format correlation alerts and notify stakeholders.
+      Policies:
+        - AWSLambdaBasicExecutionRole
+        - Statement:
+            Effect: Allow
+            Action:
+              - sns:Publish
+            Resource: !Ref ReportTopic
+        - Statement:
+            Effect: Allow
+            Action:
+              - s3:GetObject
+              - s3:PutObject
+            Resource: !Sub '${ArtifactBucket.Arn}/*'
+
+  WeeklyRule:
+    Type: AWS::Events::Rule
+    Properties:
+      Description: Weekly cost/security correlation trigger.
+      ScheduleExpression: !Ref ScheduleCron
+      State: ENABLED
+      Targets:
+        - Arn: !GetAtt CostCollectorFunction.Arn
+          Id: CostCollectorTarget
+        - Arn: !GetAtt SecCollectorFunction.Arn
+          Id: SecCollectorTarget
+        - Arn: !GetAtt CorrelateFunction.Arn
+          Id: CorrelateTarget
+        - Arn: !GetAtt ReporterFunction.Arn
+          Id: ReporterTarget
+
+  PermissionEventsCost:
+    Type: AWS::Lambda::Permission
+    Properties:
+      FunctionName: !Ref CostCollectorFunction
+      Action: lambda:InvokeFunction
+      Principal: events.amazonaws.com
+      SourceArn: !GetAtt WeeklyRule.Arn
+
+  PermissionEventsSec:
+    Type: AWS::Lambda::Permission
+    Properties:
+      FunctionName: !Ref SecCollectorFunction
+      Action: lambda:InvokeFunction
+      Principal: events.amazonaws.com
+      SourceArn: !GetAtt WeeklyRule.Arn
+
+  PermissionEventsCorrelate:
+    Type: AWS::Lambda::Permission
+    Properties:
+      FunctionName: !Ref CorrelateFunction
+      Action: lambda:InvokeFunction
+      Principal: events.amazonaws.com
+      SourceArn: !GetAtt WeeklyRule.Arn
+
+  PermissionEventsReporter:
+    Type: AWS::Lambda::Permission
+    Properties:
+      FunctionName: !Ref ReporterFunction
+      Action: lambda:InvokeFunction
+      Principal: events.amazonaws.com
+      SourceArn: !GetAtt WeeklyRule.Arn
+
+Outputs:
+  ArtifactBucketName:
+    Description: Artifact S3 bucket used for raw snapshots and reports.
+    Value: !Ref ArtifactBucket
+  ReportTopicArn:
+    Description: SNS topic used for report notifications.
+    Value: !Ref ReportTopic
+  CostCollectorArn:
+    Description: ARN of the Cost Collector Lambda.
+    Value: !GetAtt CostCollectorFunction.Arn
+  SecCollectorArn:
+    Description: ARN of the Security Collector Lambda.
+    Value: !GetAtt SecCollectorFunction.Arn
+  CorrelateFunctionArn:
+    Description: ARN of the Correlate Lambda.
+    Value: !GetAtt CorrelateFunction.Arn
+  ReporterFunctionArn:
+    Description: ARN of the Reporter Lambda.
+    Value: !GetAtt ReporterFunction.Arn

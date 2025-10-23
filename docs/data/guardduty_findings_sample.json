@@ -1,0 +1,13 @@
+{
+  "Findings": [
+    {
+      "Id": "sample-finding-guardduty-1",
+      "AccountId": "123456789012",
+      "Region": "us-east-1",
+      "Type": "UnauthorizedAccess:EC2/SSHBruteForce",
+      "Severity": "5",
+      "Title": "Brute force attack against EC2 instance",
+      "CreatedAt": "2025-10-18T21:45:00+00:00"
+    }
+  ]
+}

@@ -1,0 +1,167 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Transform: AWS::Serverless-2016-10-31
+Description: >-
+  Cost × Security Correlation stack. TODO: review IAM least privilege before production.
+Globals:
+  Function:
+    Runtime: python3.11
+    Timeout: 30
+    MemorySize: 512
+    Tracing: Active
+    Environment:
+      Variables:
+        APP_ENV: !Ref EnvironmentName
+        AWS_REGION: !Ref AWS::Region
+        LOG_LEVEL: INFO
+        DRY_RUN: true
+        RAW_DATA_BUCKET: !Ref RawDataBucket
+        REPORTS_BUCKET: !Ref ReportsBucket
+        SNS_TOPIC_ARN: !Ref AlertTopic
+        SSM_PARAMETER_PREFIX: !Ref ParameterPrefix
+        SECRETS_PREFIX: !Ref SecretsPrefix
+Resources:
+  CostCollectorFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      CodeUri: ../src/
+      Handler: src.cost_collector.handler.lambda_handler
+      Events:
+        ManualInvoke:
+          Type: Api
+          Properties:
+            Path: /cost
+            Method: post
+      Policies:
+        - AWSLambdaBasicExecutionRole
+        - Statement:
+            Effect: Allow
+            Action:
+              - ce:GetCostAndUsage
+            Resource: '*'
+        - Statement:
+            Effect: Allow
+            Action:
+              - s3:PutObject
+            Resource: !Sub '${RawDataBucket.Arn}/*'
+  SecurityCollectorFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      CodeUri: ../src/
+      Handler: src.sec_collector.handler.lambda_handler
+      Policies:
+        - AWSLambdaBasicExecutionRole
+        - Statement:
+            Effect: Allow
+            Action:
+              - securityhub:GetFindings
+              - guardduty:ListDetectors
+              - guardduty:ListFindings
+              - guardduty:GetFindings
+            Resource: '*'
+        - Statement:
+            Effect: Allow
+            Action:
+              - s3:PutObject
+            Resource: !Sub '${RawDataBucket.Arn}/*'
+  CorrelateFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      CodeUri: ../src/
+      Handler: src.correlate.handler.lambda_handler
+      Policies:
+        - AWSLambdaBasicExecutionRole
+        - Statement:
+            Effect: Allow
+            Action:
+              - s3:GetObject
+              - s3:PutObject
+            Resource:
+              - !Sub '${RawDataBucket.Arn}/*'
+              - !Sub '${ReportsBucket.Arn}/*'
+  ReporterFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      CodeUri: ../src/
+      Handler: src.reporter.handler.lambda_handler
+      Policies:
+        - AWSLambdaBasicExecutionRole
+        - Statement:
+            Effect: Allow
+            Action:
+              - sns:Publish
+            Resource: !Ref AlertTopic
+        - Statement:
+            Effect: Allow
+            Action:
+              - s3:GetObject
+              - s3:PutObject
+            Resource: !Sub '${ReportsBucket.Arn}/*'
+  WeeklyScheduler:
+    Type: AWS::Events::Rule
+    Properties:
+      Description: Trigger the weekly cost and security collection.
+      ScheduleExpression: cron(0 2 ? * MON *)
+      State: ENABLED
+      Targets:
+        - Arn: !GetAtt CostCollectorFunction.Arn
+          Id: CostCollectorTarget
+        - Arn: !GetAtt SecurityCollectorFunction.Arn
+          Id: SecurityCollectorTarget
+    DependsOn:
+      - CostCollectorFunction
+      - SecurityCollectorFunction
+  PermissionForEventsToInvokeCostCollector:
+    Type: AWS::Lambda::Permission
+    Properties:
+      FunctionName: !Ref CostCollectorFunction
+      Action: lambda:InvokeFunction
+      Principal: events.amazonaws.com
+      SourceArn: !GetAtt WeeklyScheduler.Arn
+  PermissionForEventsToInvokeSecurityCollector:
+    Type: AWS::Lambda::Permission
+    Properties:
+      FunctionName: !Ref SecurityCollectorFunction
+      Action: lambda:InvokeFunction
+      Principal: events.amazonaws.com
+      SourceArn: !GetAtt WeeklyScheduler.Arn
+  RawDataBucket:
+    Type: AWS::S3::Bucket
+    Properties:
+      BucketName: !Sub '${AWS::StackName}-raw-${AWS::AccountId}'
+      VersioningConfiguration:
+        Status: Enabled
+  ReportsBucket:
+    Type: AWS::S3::Bucket
+    Properties:
+      BucketName: !Sub '${AWS::StackName}-reports-${AWS::AccountId}'
+      VersioningConfiguration:
+        Status: Enabled
+  AlertTopic:
+    Type: AWS::SNS::Topic
+    Properties:
+      DisplayName: CostSecurityWeeklyAlerts
+      TopicName: !Sub '${AWS::StackName}-alerts'
+Parameters:
+  EnvironmentName:
+    Type: String
+    Default: dev
+    AllowedValues:
+      - dev
+      - stage
+      - prod
+  ParameterPrefix:
+    Type: String
+    Default: cost-security
+  SecretsPrefix:
+    Type: String
+    Default: cost-security/secrets
+Outputs:
+  CostCollectorFunctionArn:
+    Description: ARN of the cost collector function.
+    Value: !GetAtt CostCollectorFunction.Arn
+  SecurityCollectorFunctionArn:
+    Description: ARN of the security collector function.
+    Value: !GetAtt SecurityCollectorFunction.Arn
+  ReportsBucketName:
+    Description: Name of the reports bucket.
+    Value: !Ref ReportsBucket

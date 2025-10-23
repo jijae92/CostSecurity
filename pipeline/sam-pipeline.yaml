@@ -1,0 +1,172 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: >-
+  CI/CD pipeline for Cost × Security Correlation (Source -> Build -> Manual Approval -> SAM Deploy).
+
+Parameters:
+  SourceRepository:
+    Type: String
+    Description: CodeCommit repository name (or GitHub connection source)
+    Default: cost-security
+  SourceBranch:
+    Type: String
+    Default: main
+  SeverityMinimum:
+    Type: String
+    Default: MEDIUM
+  DeltaThreshold:
+    Type: Number
+    Default: 30
+
+Resources:
+  PipelineBucket:
+    Type: AWS::S3::Bucket
+    Properties:
+      VersioningConfiguration:
+        Status: Enabled
+
+  PipelineRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: codepipeline.amazonaws.com
+            Action: sts:AssumeRole
+      Policies:
+        - PolicyName: PipelineBasePolicy
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - codebuild:StartBuild
+                  - codebuild:BatchGetBuilds
+                  - s3:GetObject
+                  - s3:GetObjectVersion
+                  - s3:PutObject
+                  - s3:GetBucketVersioning
+                Resource: '*'
+              - Effect: Allow
+                Action:
+                  - iam:PassRole
+                Resource: '*'
+
+  CodeBuildRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: codebuild.amazonaws.com
+            Action: sts:AssumeRole
+      Policies:
+        - PolicyName: CodeBuildArtifacts
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - logs:CreateLogGroup
+                  - logs:CreateLogStream
+                  - logs:PutLogEvents
+                Resource: '*'
+              - Effect: Allow
+                Action:
+                  - s3:GetObject
+                  - s3:GetObjectVersion
+                  - s3:GetBucketVersioning
+                  - s3:PutObject
+                Resource: '*'
+
+  CodeBuildProject:
+    Type: AWS::CodeBuild::Project
+    Properties:
+      Name: cost-security-build
+      ServiceRole: !GetAtt CodeBuildRole.Arn
+      Artifacts:
+        Type: CODEPIPELINE
+      Environment:
+        ComputeType: BUILD_GENERAL1_SMALL
+        Image: aws/codebuild/standard:7.0
+        Type: LINUX_CONTAINER
+        EnvironmentVariables:
+          - Name: SEVERITY_MIN
+            Value: !Ref SeverityMinimum
+          - Name: DELTA_THRESHOLD
+            Value: !Ref DeltaThreshold
+      Source:
+        Type: CODEPIPELINE
+      TimeoutInMinutes: 30
+      BuildSpec: pipeline/buildspec.yml
+
+  Pipeline:
+    Type: AWS::CodePipeline::Pipeline
+    Properties:
+      RoleArn: !GetAtt PipelineRole.Arn
+      ArtifactStore:
+        Type: S3
+        Location: !Ref PipelineBucket
+      Stages:
+        - Name: Source
+          Actions:
+            - Name: Source
+              ActionTypeId:
+                Category: Source
+                Owner: AWS
+                Provider: CodeCommit
+                Version: '1'
+              OutputArtifacts:
+                - Name: SourceOutput
+              Configuration:
+                RepositoryName: !Ref SourceRepository
+                BranchName: !Ref SourceBranch
+        - Name: Build
+          Actions:
+            - Name: Build
+              ActionTypeId:
+                Category: Build
+                Owner: AWS
+                Provider: CodeBuild
+                Version: '1'
+              InputArtifacts:
+                - Name: SourceOutput
+              OutputArtifacts:
+                - Name: BuildOutput
+              Configuration:
+                ProjectName: !Ref CodeBuildProject
+        - Name: ManualApproval
+          Actions:
+            - Name: Approval
+              ActionTypeId:
+                Category: Approval
+                Owner: AWS
+                Provider: Manual
+                Version: '1'
+        - Name: Deploy
+          Actions:
+            - Name: DeployWithSAM
+              ActionTypeId:
+                Category: Deploy
+                Owner: AWS
+                Provider: CloudFormation
+                Version: '1'
+              InputArtifacts:
+                - Name: SourceOutput
+              Configuration:
+                ActionMode: CHANGE_SET_REPLACE
+                Capabilities: CAPABILITY_IAM,CAPABILITY_AUTO_EXPAND
+                StackName: cost-security-stack
+                ChangeSetName: cost-security-changeset
+                TemplatePath: SourceOutput::infra/template.yaml
+
+Outputs:
+  PipelineName:
+    Description: Name of the created CodePipeline.
+    Value: !Ref Pipeline
+  BuildProjectName:
+    Description: Name of the CodeBuild project.
+    Value: !Ref CodeBuildProject

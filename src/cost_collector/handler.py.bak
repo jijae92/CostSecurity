@@ -1,0 +1,47 @@
+"""Lambda handler for weekly cost collection."""
+
+from __future__ import annotations
+
+from datetime import datetime, timedelta, timezone
+from typing import Any, Dict
+
+from src.common.config import AppConfig, load_config
+from src.common.log import get_logger
+from src.common.s3io import RawS3Writer
+from src.common.timeutil import isoformat_no_ms
+
+from .ce_client import CostExplorerClient
+
+LOGGER = get_logger(__name__)
+
+
+def _default_time_period() -> Dict[str, str]:
+    now = datetime.now(timezone.utc)
+    start = now - timedelta(days=7)
+    return {"Start": start.date().isoformat(), "End": now.date().isoformat()}
+
+
+def lambda_handler(event: Dict[str, Any], _context: Any) -> Dict[str, Any]:
+    """Entry point expected by AWS Lambda."""
+    config = load_config()
+    LOGGER.info("Starting cost collection", extra={"env": config.environment, "dry_run": config.dry_run})
+
+    client = CostExplorerClient.from_config(config)
+    time_period = event.get("time_period", _default_time_period())
+    group_by = event.get("group_by") or [
+        {"Type": "DIMENSION", "Key": "SERVICE"},
+        {"Type": "DIMENSION", "Key": "LINKED_ACCOUNT"},
+    ]
+
+    response = client.load_costs(time_period=time_period, group_by=group_by)
+    writer = RawS3Writer.from_config(config)
+    object_key = f"cost/{config.environment}/{isoformat_no_ms()}-cost.json"
+    writer.persist(payload=response, object_key=object_key)
+
+    summary = {"status": "success", "records": len(response.get("ResultsByTime", [])), "object_key": object_key}
+    LOGGER.info("Cost collection completed", extra=summary)
+    return summary
+
+
+if __name__ == "__main__":
+    raise SystemExit("Use AWS SAM or `make invoke-cost` to run the handler.")

@@ -1,0 +1,53 @@
+"""Correlation utilities."""
+
+from __future__ import annotations
+
+import hashlib
+import json
+from datetime import datetime, timezone
+from typing import Dict, Iterable, List
+
+from src.correlate.models import CorrelatedSignal, CostDatum, SecurityFinding
+from src.correlate.rules import RuleContext, RuleEngine
+from src.common.log import get_logger
+
+LOGGER = get_logger(__name__)
+
+
+def correlate(cost_records: Iterable[CostDatum], findings: Iterable[SecurityFinding]) -> List[CorrelatedSignal]:
+    """Naive correlation strategy pairing by account, service, and region."""
+    findings_by_key: Dict[str, List[SecurityFinding]] = {}
+    for finding in findings:
+        key = _key(finding.account_id, finding.service, finding.region)
+        findings_by_key.setdefault(key, []).append(finding)
+
+    engine = RuleEngine()
+    correlated: List[CorrelatedSignal] = []
+    for cost in cost_records:
+        key = _key(cost.account_id, cost.service, cost.region)
+        matched_findings = findings_by_key.get(key, [])
+        if not matched_findings:
+            continue
+        context = RuleContext(cost=cost, findings=matched_findings)
+        signal_id = _generate_signal_id(cost, matched_findings)
+        correlated.append(engine.to_correlated_signal(context=context, signal_id=signal_id))
+    LOGGER.info("Correlation completed", extra={"signals": len(correlated)})
+    return correlated
+
+
+def _key(account_id: str, service: str, region: str) -> str:
+    return f"{account_id}:{service}:{region}".lower()
+
+
+def _generate_signal_id(cost: CostDatum, findings: Iterable[SecurityFinding]) -> str:
+    digest = hashlib.sha256()
+    digest.update(cost.account_id.encode())
+    digest.update(cost.service.encode())
+    digest.update(cost.region.encode())
+    digest.update(str(cost.timestamp).encode())
+    digest.update(json.dumps(sorted(f.finding_id for f in findings)).encode())
+    digest.update(str(datetime.now(timezone.utc).timestamp()).encode())
+    return digest.hexdigest()[:16]
+
+
+__all__ = ["correlate"]

@@ -1,0 +1,31 @@
+version: 0.2
+env:
+  variables:
+    DRY_RUN: "true"
+phases:
+  install:
+    runtime-versions:
+      python: 3.11
+  pre_build:
+    commands:
+      - pip install --upgrade pip
+      - pip install -r requirements.txt
+      - mkdir -p artifacts
+      - pytest -q
+  build:
+    commands:
+      - python -m src.correlate.handler --dry-run --use-sample-data --out artifacts/weekly_report.json
+      - python -m src.reporter.handler --dry-run --in artifacts/weekly_report.json
+  post_build:
+    commands:
+      - echo ":: Summary ::"
+      - |
+        python - <<'PY'
+        import json
+        from pathlib import Path
+        data = json.loads(Path('artifacts/weekly_report.json').read_text())
+        print(json.dumps(data, indent=2)[:2000])
+        PY
+artifacts:
+  files:
+    - artifacts/*
